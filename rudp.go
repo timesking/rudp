@@ -49,6 +49,15 @@ var (
 	rnd     = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
+func toBlockID(in []byte) int {
+	out, err := strconv.Atoi(string(in))
+	if err != nil {
+		log.Println(err)
+		return -1
+	}
+	return out
+}
+
 func NewConn(netType string, laddr *net.UDPAddr) (*RUDPConn, error) {
 	udpConn, err := net.ListenUDP(netType, laddr)
 	if err != nil {
@@ -56,7 +65,7 @@ func NewConn(netType string, laddr *net.UDPAddr) (*RUDPConn, error) {
 	}
 	conn := &RUDPConn{
 		UDPConn: *udpConn,
-		buffer:  make(map[string]map[string][]byte),
+		buffer:  make(map[string]dataBuf),
 	}
 	go conn.readConn()
 	return conn, err
@@ -65,7 +74,9 @@ func NewConn(netType string, laddr *net.UDPAddr) (*RUDPConn, error) {
 // Reliability UDP
 type RUDPConn struct {
 	net.UDPConn
-	buffer map[string]map[string][]byte
+
+	buffer map[string]dataBuf
+	closed bool
 }
 
 func (r *RUDPConn) WriteToUDP(data []byte, addr *net.UDPAddr) (int, error) {
@@ -81,7 +92,7 @@ func (r *RUDPConn) WriteToUDP(data []byte, addr *net.UDPAddr) (int, error) {
 	//blockStatus := make([]bool, blockNum)
 
 	// 文件ID，用于标识文件
-	dataID := []byte(strconv.Itoa(rnd.Int()))
+	dataID := []byte(strconv.FormatInt(rnd.Int63(), 36))
 	dataIDLen := len(dataID)
 
 	var (
@@ -110,6 +121,14 @@ func (r *RUDPConn) WriteToUDP(data []byte, addr *net.UDPAddr) (int, error) {
 			return nn, nil
 		}
 	)
+
+	// 发送文件信息
+	// 0+DataID大小+DataID+文件块数量
+	blockInfo := append(append([]byte{0, byte(dataIDLen)}, dataID...), []byte(strconv.Itoa(blockNum))...)
+	nn, e := r.UDPConn.WriteToUDP(blockInfo, addr)
+	if e != nil {
+		return nn, e
+	}
 	for i := 0; i < blockNum; i++ {
 		nn, e := writeBlock(i)
 		if e != nil && err == nil {
@@ -120,19 +139,52 @@ func (r *RUDPConn) WriteToUDP(data []byte, addr *net.UDPAddr) (int, error) {
 	return n, err
 }
 
+// 后台接收处理包
+// 根据ID组装文件
 func (r *RUDPConn) readConn() {
 	var buf = make([]byte, BufSize+256)
-	for {
+	for !r.closed {
 		n, addr, err := r.UDPConn.ReadFrom(buf)
 		if err != nil {
 			println(err.Error())
 		}
-		dataID := buf[1 : buf[0]+1]
-
-		begin := len(dataID) + 2
-		end := begin + int(buf[len(dataID)+1])
-		blockID := buf[begin:end]
-
-		log.Println(dataID, blockID, n, addr)
+		if buf[0] == 0 {
+			// 新文件
+			dataID := string(buf[2 : buf[1]+2])
+			dataSize := toBlockID(buf[buf[1]+2 : n])
+			if dataSize == -1 {
+				continue
+			}
+			r.buffer[addr.String()+dataID] = dataBuf{
+				blocks: make([][]byte, dataSize),
+			}
+			log.Println("new data!!", dataID, dataSize)
+			continue
+		}
+		dataID := string(buf[1 : buf[0]+1])
+		if v, ok := r.buffer[addr.String()+dataID]; ok {
+			dataIDLen := len(buf[1 : buf[0]+1])
+			begin := dataIDLen + 2
+			end := begin + int(buf[dataIDLen+1])
+			blockID := toBlockID(buf[begin:end])
+			data := buf[dataIDLen+end-begin+2 : n]
+			v.blocks[blockID] = data
+			log.Println(dataID, blockID, n, addr, len(data))
+		}
+		// 不存在此文件，丢弃包
 	}
+}
+
+func (r *RUDPConn) Close() error {
+	err := r.UDPConn.Close()
+	if err != nil {
+		return err
+	}
+	r.closed = true
+	return nil
+}
+
+type dataBuf struct {
+	blocks [][]byte
+	data   []byte
 }
