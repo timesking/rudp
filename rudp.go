@@ -136,6 +136,7 @@ func (r *RUDPConn) WriteToUDP(data []byte, addr *net.UDPAddr) (int, error) {
 		}
 		n += nn
 	}
+	// TODO: 丢包重传
 	return n, err
 }
 
@@ -170,9 +171,17 @@ func (r *RUDPConn) readConn() {
 			data := buf[dataIDLen+end-begin+2 : n]
 			v.blocks[blockID] = data
 			log.Println(dataID, blockID, n, addr, len(data))
+			// TODO: 判断文件的完整性，以及丢包重传
 		}
 		// 不存在此文件，丢弃包
 	}
+}
+
+func (r *RUDPConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+	// TODO: 使用chan从readConn接收文件
+	// dataChan->readChan
+	// data:=<-dataChan
+	return r.UDPConn.ReadFromUDP(b)
 }
 
 func (r *RUDPConn) Close() error {
